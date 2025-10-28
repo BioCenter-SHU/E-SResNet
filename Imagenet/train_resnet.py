@@ -193,7 +193,7 @@ def main(args):
     output_dir = os.path.join(args.output_dir, f'{args.model}_b{args.batch_size}_lr{args.lr}_T{args.T}')
 
     rank = getattr(args, "rank", 0) if hasattr(args, "rank") else 0
-    set_random_seed(args.seed + rank)
+    set_random_seed(_seed_ + rank)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
