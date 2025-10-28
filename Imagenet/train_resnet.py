@@ -224,7 +224,7 @@ def main(args):
         device = torch.device(args.device)
 
     batch_size = args.batch_size
-    dataset, dataset_test, train_sampler, test_sampler = load_data('/storage1/jq21721546/project/ImageNet/train', '/storage1/jq21721546/project/ImageNet/val', False, True)
+    dataset, dataset_test, train_sampler, test_sampler = load_data('/path/to/your/ImageNet/train', '/path/to/your/ImageNet/val', False, True)
     # dataset_root_dir = args.data_path
     train_generator = torch.Generator()
     train_generator.manual_seed(_seed_ + rank)
