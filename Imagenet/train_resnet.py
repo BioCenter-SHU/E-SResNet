@@ -1,6 +1,8 @@
 import datetime
 import os
 import time
+import random
+import numpy as np
 import torch
 import torch.utils.data
 from torch import nn
@@ -18,9 +20,9 @@ from spikingjelly.clock_driven import functional
 import utils
 from E_SResNet import E_SResNet_S, E_SResNet_M
 
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+
 _seed_ = 2025
-import random
-random.seed(2025)
 
 def seed_worker(worker_id):
     worker_info = torch.utils.data.get_worker_info()
@@ -29,13 +31,12 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
     torch.manual_seed(worker_seed)
 
-torch.manual_seed(_seed_)  # use torch.manual_seed() to seed the RNG for all devices (both CPU and CUDA)
-torch.cuda.manual_seed_all(_seed_)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-
-import numpy as np
-np.random.seed(_seed_)
+def set_random_seed(seed: int):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, print_freq, scaler=None):
     model.train()
@@ -171,8 +172,8 @@ def load_data(traindir, valdir, cache_dataset, distributed):
 
     print("Creating data loaders")
     if distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True)
-        test_sampler = torch.utils.data.distributed.DistributedSampler(dataset_test, shuffle=False)
+        train_sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True, drop_last=True, seed=_seed_)
+        test_sampler = torch.utils.data.distributed.DistributedSampler(dataset_test, shuffle=False, drop_last=False, seed=_seed_)
     else:
         train_sampler = torch.utils.data.RandomSampler(dataset)
         test_sampler = torch.utils.data.SequentialSampler(dataset_test)
@@ -191,6 +192,16 @@ def main(args):
     print(args)
     output_dir = os.path.join(args.output_dir, f'{args.model}_b{args.batch_size}_lr{args.lr}_T{args.T}')
 
+    rank = getattr(args, "rank", 0) if hasattr(args, "rank") else 0
+    set_random_seed(args.seed + rank)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+    if hasattr(torch.backends.cudnn, "allow_tf32"):
+        torch.backends.cudnn.allow_tf32 = False
+    
     if args.zero_init_residual:
         output_dir += '_zi'
     if args.weight_decay:
@@ -206,11 +217,19 @@ def main(args):
     if output_dir:
         utils.mkdir(output_dir)
 
-    device = torch.device(args.device)
+    if args.distributed and hasattr(args, "gpu") and args.device.startswith('cuda'):
+        torch.cuda.set_device(args.gpu)
+        device = torch.device('cuda', args.gpu)
+    else:
+        device = torch.device(args.device)
 
     batch_size = args.batch_size
     dataset, dataset_test, train_sampler, test_sampler = load_data('/storage1/jq21721546/project/ImageNet/train', '/storage1/jq21721546/project/ImageNet/val', False, True)
     # dataset_root_dir = args.data_path
+    train_generator = torch.Generator()
+    train_generator.manual_seed(_seed_ + rank)
+    test_generator = torch.Generator()
+    test_generator.manual_seed(_seed_ + 12345 + rank)
     data_loader = torch.utils.data.DataLoader(
         dataset=dataset,
         batch_size=batch_size,
@@ -218,7 +237,8 @@ def main(args):
         pin_memory=True,
         drop_last=True,
         num_workers=args.workers,
-        worker_init_fn=seed_worker)
+        worker_init_fn=seed_worker,
+        generator=train_generator)
 
     data_loader_test = torch.utils.data.DataLoader(
         dataset=dataset_test,
@@ -227,7 +247,8 @@ def main(args):
         pin_memory=True,
         drop_last=False,
         num_workers=args.workers,
-        worker_init_fn=seed_worker)    
+        worker_init_fn=seed_worker,
+        generator=test_generator)    
 
     print("Creating model")
 
@@ -279,7 +300,12 @@ def main(args):
         return
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.gpu] if args.device.startswith('cuda') and hasattr(args, "gpu") else None,
+            output_device=args.gpu if args.device.startswith('cuda') and hasattr(args, "gpu") else None,
+            find_unused_parameters=False,
+        )
 
     if args.tb and utils.is_main_process():
         purge_step_train = args.start_epoch
@@ -297,6 +323,8 @@ def main(args):
         save_max = False
         if args.distributed:
             train_sampler.set_epoch(epoch)
+            if hasattr(test_sampler, "set_epoch"):
+                test_sampler.set_epoch(epoch)
         train_loss, train_acc1, train_acc5 = train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args.print_freq, scaler)
         if train_tb_writer is not None and utils.is_main_process():
             train_tb_writer.add_scalar('train_loss', train_loss, epoch)
@@ -438,5 +466,4 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    cudnn.benchmark = True
     main(args)
