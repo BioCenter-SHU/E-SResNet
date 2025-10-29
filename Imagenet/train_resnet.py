@@ -20,7 +20,7 @@ from spikingjelly.clock_driven import functional
 import utils
 from E_SResNet import E_SResNet_S, E_SResNet_M
 
-os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:2")
 
 _seed_ = 2025
 
